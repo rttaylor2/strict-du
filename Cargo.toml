@@ -1,0 +1,9 @@
+[package]
+name = "strict-du"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Strict-by-default disk usage scanning, with an explicit lenient mode."
+authors = ["rttaylor2"]
+
+[dependencies]
