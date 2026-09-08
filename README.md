@@ -28,7 +28,7 @@ use std::path::Path;
 // Strict by default: the first unreadable file or directory returns
 // an error instead of a possibly-wrong total.
 let report = scan(Path::new("/var/log"), &ScanOptions::default())?;
-println!("{} bytes across {} files", report.usage.bytes, report.usage.files);
+println!("{} across {} files", report.usage.human_bytes(), report.usage.files);
 # Ok::<(), std::io::Error>(())
 ```
 
@@ -56,11 +56,15 @@ for skipped in &report.skipped {
 (`follow_symlinks`, off by default — following symlinks can double-count
 space shared between two parts of a tree, or loop on a cycle).
 
+Byte counts are raw `u64`s; `human_bytes` (also available as
+`DiskUsage::human_bytes`) formats them the way `du -h` does, e.g. `"4.2 MiB"`,
+using binary (1024-based) units.
+
 ## Status
 
 Early skeleton. The scanning core works and is tested; see the roadmap in
-the repo history for what's planned next (human-readable formatting,
-per-top-level-entry breakdowns, hardlink dedup).
+the repo history for what's planned next (per-top-level-entry breakdowns,
+hardlink dedup).
 
 ## License
 

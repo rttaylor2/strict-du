@@ -18,6 +18,10 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
+mod human;
+
+pub use human::human_bytes;
+
 /// Aggregate disk usage for a directory tree.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DiskUsage {
@@ -34,6 +38,11 @@ impl DiskUsage {
 
     fn add_dir(&mut self) {
         self.dirs += 1;
+    }
+
+    /// `self.bytes` formatted the way `du -h` would print it, e.g. `"4.2 MiB"`.
+    pub fn human_bytes(&self) -> String {
+        human_bytes(self.bytes)
     }
 }
 
