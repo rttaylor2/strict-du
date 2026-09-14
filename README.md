@@ -60,11 +60,30 @@ Byte counts are raw `u64`s; `human_bytes` (also available as
 `DiskUsage::human_bytes`) formats them the way `du -h` does, e.g. `"4.2 MiB"`,
 using binary (1024-based) units.
 
+For a `du -d1`-style breakdown — a subtotal per immediate child of `root`,
+plus the same grand total `scan` would produce — use `scan_top_level`:
+
+```rust
+use strict_du::{scan_top_level, ScanOptions};
+use std::path::Path;
+
+let breakdown = scan_top_level(Path::new("/var/log"), &ScanOptions::default())?;
+for entry in &breakdown.entries {
+    println!("{:>10}  {}", entry.report.usage.human_bytes(), entry.name.to_string_lossy());
+}
+println!("{:>10}  total", breakdown.total.usage.human_bytes());
+# Ok::<(), std::io::Error>(())
+```
+
+In lenient mode, an error while measuring one child is recorded on that
+child's own `entry.report.skipped` rather than merged into
+`breakdown.total.skipped`, so you can tell which entry it came from.
+
 ## Status
 
-Early skeleton. The scanning core works and is tested; see the roadmap in
-the repo history for what's planned next (per-top-level-entry breakdowns,
-hardlink dedup).
+The scanning core and the top-level breakdown both work and are tested; see
+the roadmap in the repo history for what's planned next (hardlink dedup,
+cross-filesystem boundary detection).
 
 ## License
 

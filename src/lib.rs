@@ -11,6 +11,7 @@
 //! former (fail loudly) and makes the latter an explicit, opt-in choice via
 //! [`ScanOptions::lenient`].
 
+use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -43,6 +44,14 @@ impl DiskUsage {
     /// `self.bytes` formatted the way `du -h` would print it, e.g. `"4.2 MiB"`.
     pub fn human_bytes(&self) -> String {
         human_bytes(self.bytes)
+    }
+}
+
+impl std::ops::AddAssign for DiskUsage {
+    fn add_assign(&mut self, other: DiskUsage) {
+        self.bytes += other.bytes;
+        self.files += other.files;
+        self.dirs += other.dirs;
     }
 }
 
@@ -110,6 +119,99 @@ pub fn scan(root: &Path, options: &ScanOptions) -> io::Result<ScanReport> {
     }
 
     Ok(report)
+}
+
+/// One immediate child of the scanned root, with its own subtotal.
+#[derive(Debug)]
+pub struct TopLevelEntry {
+    pub name: OsString,
+    pub report: ScanReport,
+}
+
+/// Result of [`scan_top_level`]: a `du -d1`-style breakdown.
+///
+/// `total.usage` is the same figure `scan` would have produced for the same
+/// root. `total.skipped` only holds errors that couldn't be attributed to a
+/// specific child (failing to list `root` itself, for instance) — errors
+/// encountered while measuring a particular child land in that child's own
+/// `TopLevelEntry::report.skipped` instead, so a caller can tell which entry
+/// they came from.
+#[derive(Debug, Default)]
+pub struct TopLevelBreakdown {
+    pub entries: Vec<TopLevelEntry>,
+    pub total: ScanReport,
+}
+
+/// Walk `root` one level at a time, like `du -d1`: a subtotal per immediate
+/// child, plus the same grand total [`scan`] would produce.
+///
+/// If `root` is a file rather than a directory, the breakdown has a single
+/// entry for `root` itself. See [`ScanOptions`] for how errors and symlinks
+/// are handled; in strict mode, an error anywhere below `root` still aborts
+/// the whole scan rather than just the entry it occurred in.
+pub fn scan_top_level(root: &Path, options: &ScanOptions) -> io::Result<TopLevelBreakdown> {
+    let mut breakdown = TopLevelBreakdown::default();
+
+    let metadata = match read_metadata(root, options) {
+        Ok(metadata) => metadata,
+        Err(err) => {
+            handle_error(root, err, options, &mut breakdown.total)?;
+            return Ok(breakdown);
+        }
+    };
+
+    if !metadata.is_dir() {
+        let mut report = ScanReport::default();
+        report.usage.add_file(disk_bytes(&metadata));
+        breakdown.total.usage += report.usage;
+        breakdown.entries.push(TopLevelEntry {
+            name: root.file_name().map(OsString::from).unwrap_or_default(),
+            report,
+        });
+        return Ok(breakdown);
+    }
+
+    let dir_entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(err) => {
+            handle_error(root, err, options, &mut breakdown.total)?;
+            return Ok(breakdown);
+        }
+    };
+
+    for entry in dir_entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                handle_error(root, err, options, &mut breakdown.total)?;
+                continue;
+            }
+        };
+
+        let path = entry.path();
+        let mut child_report = ScanReport::default();
+
+        match read_metadata(&path, options) {
+            Ok(metadata) if metadata.is_dir() => {
+                child_report.usage.add_dir();
+                walk(&path, options, &mut child_report)?;
+            }
+            Ok(metadata) => {
+                child_report.usage.add_file(disk_bytes(&metadata));
+            }
+            Err(err) => {
+                handle_error(&path, err, options, &mut child_report)?;
+            }
+        }
+
+        breakdown.total.usage += child_report.usage;
+        breakdown.entries.push(TopLevelEntry {
+            name: entry.file_name(),
+            report: child_report,
+        });
+    }
+
+    Ok(breakdown)
 }
 
 fn walk(dir: &Path, options: &ScanOptions, report: &mut ScanReport) -> io::Result<()> {

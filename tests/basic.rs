@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use strict_du::{scan, ScanOptions};
+use strict_du::{scan, scan_top_level, ScanOptions};
 
 fn unique_temp_dir(label: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -63,4 +63,89 @@ fn lenient_mode_records_missing_root_instead_of_failing() {
 
     assert_eq!(report.skipped.len(), 1);
     assert_eq!(report.skipped[0].path, root);
+}
+
+#[test]
+fn top_level_breakdown_has_one_entry_per_child() {
+    let root = unique_temp_dir("breakdown");
+    fs::create_dir(root.join("sub")).unwrap();
+    fs::write(root.join("sub").join("b.txt"), b"world!!").unwrap();
+    fs::write(root.join("a.txt"), b"hello").unwrap();
+
+    let breakdown = scan_top_level(&root, &ScanOptions::default()).unwrap();
+
+    assert_eq!(breakdown.entries.len(), 2);
+
+    let sub = breakdown
+        .entries
+        .iter()
+        .find(|e| e.name == "sub")
+        .expect("sub entry present");
+    assert_eq!(sub.report.usage.files, 1);
+    assert_eq!(sub.report.usage.dirs, 1);
+
+    let a = breakdown
+        .entries
+        .iter()
+        .find(|e| e.name == "a.txt")
+        .expect("a.txt entry present");
+    assert_eq!(a.report.usage.files, 1);
+    assert_eq!(a.report.usage.dirs, 0);
+
+    let full_scan = scan(&root, &ScanOptions::default()).unwrap();
+    assert_eq!(breakdown.total.usage, full_scan.usage);
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn top_level_breakdown_on_a_file_root_has_a_single_entry() {
+    let root = unique_temp_dir("breakdown-single-file");
+    let file = root.join("only.txt");
+    fs::write(&file, b"contents").unwrap();
+
+    let breakdown = scan_top_level(&file, &ScanOptions::default()).unwrap();
+
+    assert_eq!(breakdown.entries.len(), 1);
+    assert_eq!(breakdown.entries[0].name, "only.txt");
+    assert_eq!(breakdown.entries[0].report.usage.files, 1);
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn top_level_breakdown_attributes_skips_to_the_owning_entry() {
+    // A broken symlink is a reliable way to make metadata() fail for one
+    // specific, known child, without racing a delete against the scan.
+    let root = unique_temp_dir("breakdown-lenient");
+    fs::write(root.join("a.txt"), b"hello").unwrap();
+    std::os::unix::fs::symlink(root.join("does-not-exist"), root.join("ghost")).unwrap();
+
+    let options = ScanOptions {
+        lenient: true,
+        follow_symlinks: true,
+        ..ScanOptions::default()
+    };
+
+    let breakdown = scan_top_level(&root, &options).unwrap();
+
+    assert!(breakdown.total.skipped.is_empty());
+
+    let ghost_entry = breakdown
+        .entries
+        .iter()
+        .find(|e| e.name == "ghost")
+        .expect("ghost entry present");
+    assert_eq!(ghost_entry.report.skipped.len(), 1);
+    assert_eq!(ghost_entry.report.usage, strict_du::DiskUsage::default());
+
+    let a_entry = breakdown
+        .entries
+        .iter()
+        .find(|e| e.name == "a.txt")
+        .expect("a.txt entry present");
+    assert!(a_entry.report.skipped.is_empty());
+
+    fs::remove_dir_all(&root).unwrap();
 }
