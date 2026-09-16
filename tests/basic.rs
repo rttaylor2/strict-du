@@ -115,6 +115,43 @@ fn top_level_breakdown_on_a_file_root_has_a_single_entry() {
 
 #[test]
 #[cfg(unix)]
+fn hardlinked_files_are_only_counted_once() {
+    let root = unique_temp_dir("hardlinks");
+    let original = root.join("a.txt");
+    fs::write(&original, b"hello world").unwrap();
+    fs::hard_link(&original, root.join("b.txt")).unwrap();
+
+    let report = scan(&root, &ScanOptions::default()).unwrap();
+    let single_file = scan(&original, &ScanOptions::default()).unwrap();
+
+    // Two directory entries, but the shared inode's disk usage should only
+    // be charged once, so the tree's total matches a scan of just one name.
+    assert_eq!(report.usage.files, 2);
+    assert_eq!(report.usage.bytes, single_file.usage.bytes);
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn top_level_breakdown_dedupes_hardlinks_across_entries() {
+    let root = unique_temp_dir("breakdown-hardlinks");
+    fs::create_dir(root.join("sub")).unwrap();
+    fs::write(root.join("a.txt"), b"hello world").unwrap();
+    fs::hard_link(root.join("a.txt"), root.join("sub").join("b.txt")).unwrap();
+
+    let breakdown = scan_top_level(&root, &ScanOptions::default()).unwrap();
+    let full_scan = scan(&root, &ScanOptions::default()).unwrap();
+
+    // Deduplication has to share state across entries, not just within
+    // one, or this total would double-count the linked file's blocks.
+    assert_eq!(breakdown.total.usage, full_scan.usage);
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
 fn top_level_breakdown_attributes_skips_to_the_owning_entry() {
     // A broken symlink is a reliable way to make metadata() fail for one
     // specific, known child, without racing a delete against the scan.

@@ -10,7 +10,10 @@ Two things are easy to get wrong when you write your own `du`:
    file looks, not how much disk it costs. A 10 GB sparse file might occupy
    almost nothing on disk. `strict-du` sums the space the filesystem
    actually reports as allocated (`st_blocks * 512` on Unix), not the
-   logical length.
+   logical length. On Unix this also means hard-linked files are only
+   charged once: two names for the same inode share the same blocks, and
+   `strict-du` tracks which inodes it's already counted so the total
+   doesn't overstate the tree's real disk footprint.
 2. **Errors during the walk.** Permission denied on a subdirectory, a file
    that vanishes mid-scan, a broken symlink — every tool has to decide what
    to do here. Most either die on the first one, or quietly skip it and
@@ -81,9 +84,9 @@ child's own `entry.report.skipped` rather than merged into
 
 ## Status
 
-The scanning core and the top-level breakdown both work and are tested; see
-the roadmap in the repo history for what's planned next (hardlink dedup,
-cross-filesystem boundary detection).
+The scanning core and the top-level breakdown both work and are tested,
+including hardlink deduplication. Cross-filesystem boundary detection is
+planned next; see the roadmap in the repo history.
 
 ## License
 

@@ -10,6 +10,10 @@
 //! print a total that looks complete but isn't. This crate defaults to the
 //! former (fail loudly) and makes the latter an explicit, opt-in choice via
 //! [`ScanOptions::lenient`].
+//!
+//! On Unix, files with more than one hard link are only counted once: two
+//! names for the same inode share the same disk blocks, so charging both
+//! would overstate the total.
 
 use std::ffi::OsString;
 use std::fs;
@@ -17,7 +21,17 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
+use std::collections::HashSet;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+
+/// (device, inode) pairs already counted, so a file with multiple hard
+/// links only contributes its disk usage once per scan. Only meaningful
+/// on Unix, where hard links exist; a no-op elsewhere.
+#[cfg(unix)]
+type Seen = HashSet<(u64, u64)>;
+#[cfg(not(unix))]
+type Seen = ();
 
 mod human;
 
@@ -104,14 +118,15 @@ pub struct ScanReport {
 /// and symlinks are handled.
 pub fn scan(root: &Path, options: &ScanOptions) -> io::Result<ScanReport> {
     let mut report = ScanReport::default();
+    let mut seen = Seen::default();
 
     let metadata = read_metadata(root, options);
     match metadata {
         Ok(metadata) if metadata.is_dir() => {
-            walk(root, options, &mut report)?;
+            walk(root, options, &mut report, &mut seen)?;
         }
         Ok(metadata) => {
-            report.usage.add_file(disk_bytes(&metadata));
+            report.usage.add_file(disk_bytes(&metadata, &mut seen));
         }
         Err(err) => {
             handle_error(root, err, options, &mut report)?;
@@ -149,8 +164,14 @@ pub struct TopLevelBreakdown {
 /// entry for `root` itself. See [`ScanOptions`] for how errors and symlinks
 /// are handled; in strict mode, an error anywhere below `root` still aborts
 /// the whole scan rather than just the entry it occurred in.
+///
+/// Hard link deduplication (see [`scan`]) applies across the whole
+/// breakdown, not per entry: if the same inode turns up under two
+/// different top-level children, only the first one encountered gets its
+/// disk usage counted, same as a single `scan` of `root` would.
 pub fn scan_top_level(root: &Path, options: &ScanOptions) -> io::Result<TopLevelBreakdown> {
     let mut breakdown = TopLevelBreakdown::default();
+    let mut seen = Seen::default();
 
     let metadata = match read_metadata(root, options) {
         Ok(metadata) => metadata,
@@ -162,7 +183,7 @@ pub fn scan_top_level(root: &Path, options: &ScanOptions) -> io::Result<TopLevel
 
     if !metadata.is_dir() {
         let mut report = ScanReport::default();
-        report.usage.add_file(disk_bytes(&metadata));
+        report.usage.add_file(disk_bytes(&metadata, &mut seen));
         breakdown.total.usage += report.usage;
         breakdown.entries.push(TopLevelEntry {
             name: root.file_name().map(OsString::from).unwrap_or_default(),
@@ -194,10 +215,10 @@ pub fn scan_top_level(root: &Path, options: &ScanOptions) -> io::Result<TopLevel
         match read_metadata(&path, options) {
             Ok(metadata) if metadata.is_dir() => {
                 child_report.usage.add_dir();
-                walk(&path, options, &mut child_report)?;
+                walk(&path, options, &mut child_report, &mut seen)?;
             }
             Ok(metadata) => {
-                child_report.usage.add_file(disk_bytes(&metadata));
+                child_report.usage.add_file(disk_bytes(&metadata, &mut seen));
             }
             Err(err) => {
                 handle_error(&path, err, options, &mut child_report)?;
@@ -214,7 +235,12 @@ pub fn scan_top_level(root: &Path, options: &ScanOptions) -> io::Result<TopLevel
     Ok(breakdown)
 }
 
-fn walk(dir: &Path, options: &ScanOptions, report: &mut ScanReport) -> io::Result<()> {
+fn walk(
+    dir: &Path,
+    options: &ScanOptions,
+    report: &mut ScanReport,
+    seen: &mut Seen,
+) -> io::Result<()> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(err) => return handle_error(dir, err, options, report),
@@ -240,9 +266,9 @@ fn walk(dir: &Path, options: &ScanOptions, report: &mut ScanReport) -> io::Resul
 
         if metadata.is_dir() {
             report.usage.add_dir();
-            walk(&path, options, report)?;
+            walk(&path, options, report, seen)?;
         } else {
-            report.usage.add_file(disk_bytes(&metadata));
+            report.usage.add_file(disk_bytes(&metadata, seen));
         }
     }
 
@@ -278,12 +304,22 @@ fn handle_error(
 /// Bytes actually occupied on disk, not the apparent length. Sparse files
 /// and filesystem block rounding mean these can differ a lot from
 /// `metadata.len()`.
+///
+/// A file with more than one hard link shares its blocks with every other
+/// name pointing at the same inode. The first name `disk_bytes` sees for a
+/// given (device, inode) pair gets the real figure; every later name for
+/// that same inode gets `0`, so a tree with hard-linked files doesn't have
+/// their shared space counted once per name.
 #[cfg(unix)]
-fn disk_bytes(metadata: &fs::Metadata) -> u64 {
-    metadata.blocks() * 512
+fn disk_bytes(metadata: &fs::Metadata, seen: &mut Seen) -> u64 {
+    let bytes = metadata.blocks() * 512;
+    if metadata.nlink() > 1 && !seen.insert((metadata.dev(), metadata.ino())) {
+        return 0;
+    }
+    bytes
 }
 
 #[cfg(not(unix))]
-fn disk_bytes(metadata: &fs::Metadata) -> u64 {
+fn disk_bytes(metadata: &fs::Metadata, _seen: &mut Seen) -> u64 {
     metadata.len()
 }
