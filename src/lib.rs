@@ -14,6 +14,12 @@
 //! On Unix, files with more than one hard link are only counted once: two
 //! names for the same inode share the same disk blocks, so charging both
 //! would overstate the total.
+//!
+//! By default a scan follows every subdirectory it finds regardless of
+//! which filesystem it's actually on, same as plain `du`. Set
+//! [`ScanOptions::one_filesystem`] to stop at mount points instead, so a
+//! scan of a disk doesn't wander onto a mounted network share or a bind
+//! mount that's already counted elsewhere.
 
 use std::ffi::OsString;
 use std::fs;
@@ -32,6 +38,16 @@ use std::os::unix::fs::MetadataExt;
 type Seen = HashSet<(u64, u64)>;
 #[cfg(not(unix))]
 type Seen = ();
+
+/// The device a scan started on, when `ScanOptions::one_filesystem` is set.
+/// `None` means the option is off and nothing should be compared. Only
+/// meaningful on Unix, where `st_dev` identifies a filesystem; a no-op
+/// elsewhere, since the standard library doesn't expose an equivalent on
+/// other platforms.
+#[cfg(unix)]
+type Boundary = Option<u64>;
+#[cfg(not(unix))]
+type Boundary = ();
 
 mod human;
 
@@ -90,6 +106,17 @@ pub struct ScanOptions {
     /// never followed. Following symlinks can double-count space shared
     /// between two parts of a tree, or loop forever on a cyclic link.
     pub follow_symlinks: bool,
+    /// If `false` (the default), the scan crosses mount points freely,
+    /// same as plain `du`. If `true`, any directory whose device differs
+    /// from the device `root` itself is on gets excluded: its bytes aren't
+    /// counted and it isn't recursed into, the same way `du --one-file-system`
+    /// behaves. Useful for totaling "everything actually stored on this
+    /// disk" without wandering onto a mounted network share or a bind
+    /// mount of something already counted elsewhere.
+    ///
+    /// Only meaningful on Unix, where `st_dev` identifies a filesystem;
+    /// a no-op on other platforms.
+    pub one_filesystem: bool,
 }
 
 impl Default for ScanOptions {
@@ -97,6 +124,7 @@ impl Default for ScanOptions {
         ScanOptions {
             lenient: false,
             follow_symlinks: false,
+            one_filesystem: false,
         }
     }
 }
@@ -123,7 +151,8 @@ pub fn scan(root: &Path, options: &ScanOptions) -> io::Result<ScanReport> {
     let metadata = read_metadata(root, options);
     match metadata {
         Ok(metadata) if metadata.is_dir() => {
-            walk(root, options, &mut report, &mut seen)?;
+            let boundary = root_device(&metadata, options);
+            walk(root, options, &mut report, &mut seen, &boundary)?;
         }
         Ok(metadata) => {
             report.usage.add_file(disk_bytes(&metadata, &mut seen));
@@ -169,6 +198,11 @@ pub struct TopLevelBreakdown {
 /// breakdown, not per entry: if the same inode turns up under two
 /// different top-level children, only the first one encountered gets its
 /// disk usage counted, same as a single `scan` of `root` would.
+///
+/// With `ScanOptions::one_filesystem` set, a top-level child that's a mount
+/// point for a different filesystem than `root` still gets a
+/// `TopLevelEntry`, but with an empty `report`: it's listed so callers know
+/// it was there, without its contents being walked or counted.
 pub fn scan_top_level(root: &Path, options: &ScanOptions) -> io::Result<TopLevelBreakdown> {
     let mut breakdown = TopLevelBreakdown::default();
     let mut seen = Seen::default();
@@ -192,6 +226,8 @@ pub fn scan_top_level(root: &Path, options: &ScanOptions) -> io::Result<TopLevel
         return Ok(breakdown);
     }
 
+    let boundary = root_device(&metadata, options);
+
     let dir_entries = match fs::read_dir(root) {
         Ok(entries) => entries,
         Err(err) => {
@@ -213,9 +249,10 @@ pub fn scan_top_level(root: &Path, options: &ScanOptions) -> io::Result<TopLevel
         let mut child_report = ScanReport::default();
 
         match read_metadata(&path, options) {
+            Ok(metadata) if metadata.is_dir() && crosses_boundary(&boundary, &metadata) => {}
             Ok(metadata) if metadata.is_dir() => {
                 child_report.usage.add_dir();
-                walk(&path, options, &mut child_report, &mut seen)?;
+                walk(&path, options, &mut child_report, &mut seen, &boundary)?;
             }
             Ok(metadata) => {
                 child_report.usage.add_file(disk_bytes(&metadata, &mut seen));
@@ -240,6 +277,7 @@ fn walk(
     options: &ScanOptions,
     report: &mut ScanReport,
     seen: &mut Seen,
+    boundary: &Boundary,
 ) -> io::Result<()> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -265,14 +303,45 @@ fn walk(
         };
 
         if metadata.is_dir() {
+            if crosses_boundary(boundary, &metadata) {
+                continue;
+            }
             report.usage.add_dir();
-            walk(&path, options, report, seen)?;
+            walk(&path, options, report, seen, boundary)?;
         } else {
             report.usage.add_file(disk_bytes(&metadata, seen));
         }
     }
 
     Ok(())
+}
+
+/// The device `root`'s own metadata reports, if `ScanOptions::one_filesystem`
+/// is set; `None` (or, on non-Unix, the unit no-op) otherwise, meaning
+/// nothing should be excluded.
+#[cfg(unix)]
+fn root_device(metadata: &fs::Metadata, options: &ScanOptions) -> Boundary {
+    if options.one_filesystem {
+        Some(metadata.dev())
+    } else {
+        None
+    }
+}
+
+#[cfg(not(unix))]
+fn root_device(_metadata: &fs::Metadata, _options: &ScanOptions) -> Boundary {}
+
+/// Whether `metadata` lives on a different device than the scan started on.
+/// Always `false` when `boundary` is `None` (the option is off) or on
+/// non-Unix platforms, where there's nothing to compare.
+#[cfg(unix)]
+fn crosses_boundary(boundary: &Boundary, metadata: &fs::Metadata) -> bool {
+    matches!(boundary, Some(root_dev) if *root_dev != metadata.dev())
+}
+
+#[cfg(not(unix))]
+fn crosses_boundary(_boundary: &Boundary, _metadata: &fs::Metadata) -> bool {
+    false
 }
 
 fn read_metadata(path: &Path, options: &ScanOptions) -> io::Result<fs::Metadata> {

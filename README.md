@@ -57,7 +57,12 @@ for skipped in &report.skipped {
 
 `ScanOptions` also controls whether symlinks are followed
 (`follow_symlinks`, off by default — following symlinks can double-count
-space shared between two parts of a tree, or loop on a cycle).
+space shared between two parts of a tree, or loop on a cycle), and whether
+the scan stays on the filesystem `root` started on (`one_filesystem`, off
+by default). Turning `one_filesystem` on makes the scan skip any directory
+whose device differs from `root`'s, the same way `du --one-file-system`
+does — useful for totaling a single disk without wandering onto a mounted
+network share.
 
 Byte counts are raw `u64`s; `human_bytes` (also available as
 `DiskUsage::human_bytes`) formats them the way `du -h` does, e.g. `"4.2 MiB"`,
@@ -85,8 +90,9 @@ child's own `entry.report.skipped` rather than merged into
 ## Status
 
 The scanning core and the top-level breakdown both work and are tested,
-including hardlink deduplication. Cross-filesystem boundary detection is
-planned next; see the roadmap in the repo history.
+including hardlink deduplication and filesystem-boundary detection.
+Benchmarking large trees, and deciding whether a streaming/incremental API
+is worth the complexity, is next.
 
 ## License
 

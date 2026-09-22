@@ -151,6 +151,32 @@ fn top_level_breakdown_dedupes_hardlinks_across_entries() {
 }
 
 #[test]
+fn one_filesystem_matches_default_when_everything_is_on_one_filesystem() {
+    let root = unique_temp_dir("one-filesystem");
+    fs::create_dir(root.join("sub")).unwrap();
+    fs::write(root.join("sub").join("b.txt"), b"world!!").unwrap();
+    fs::write(root.join("a.txt"), b"hello").unwrap();
+
+    let default_report = scan(&root, &ScanOptions::default()).unwrap();
+    let options = ScanOptions {
+        one_filesystem: true,
+        ..ScanOptions::default()
+    };
+    let bounded_report = scan(&root, &options).unwrap();
+
+    // A temp dir and everything under it live on one filesystem, so this
+    // option shouldn't change anything here; it only matters once a mount
+    // point is actually in the tree.
+    assert_eq!(default_report.usage, bounded_report.usage);
+
+    let default_breakdown = scan_top_level(&root, &ScanOptions::default()).unwrap();
+    let bounded_breakdown = scan_top_level(&root, &options).unwrap();
+    assert_eq!(default_breakdown.total.usage, bounded_breakdown.total.usage);
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 #[cfg(unix)]
 fn top_level_breakdown_attributes_skips_to_the_owning_entry() {
     // A broken symlink is a reliable way to make metadata() fail for one
