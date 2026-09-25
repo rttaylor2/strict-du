@@ -91,8 +91,17 @@ child's own `entry.report.skipped` rather than merged into
 
 The scanning core and the top-level breakdown both work and are tested,
 including hardlink deduplication and filesystem-boundary detection.
-Benchmarking large trees, and deciding whether a streaming/incremental API
-is worth the complexity, is next.
+
+`examples/bench_large_tree.rs` builds a synthetic tree and times `scan` and
+`scan_top_level` against it:
+
+```sh
+cargo run --release --example bench_large_tree -- 200000 30
+```
+
+The two arguments (file count, branching factor) are both optional and
+default to 50,000 and 20. Deciding whether a streaming/incremental API is
+worth the complexity, informed by these numbers, is next.
 
 ## License
 
